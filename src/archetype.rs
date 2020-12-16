@@ -34,6 +34,38 @@ pub struct Archetype {
     data: UnsafeCell<NonNull<u8>>,
     data_size: usize,
 }
+impl Clone for Archetype {
+    fn clone(&self) -> Self {
+        // [types] cloned
+        let mut target = Self::new(self.types.clone());
+        // [types, len, data_size, state, entities] cloned, value.data resized to match self.data
+        target.grow(self.len);
+        // todo verify that no one has a borrow or borrow mut out on the self object
+
+        // this properly initialies value.data to be the cloned equivalent of self.data
+        for type_info in self.types.iter() {
+            for i in 0..(self.len as usize) {
+                unsafe {
+                    let src = (*self.data.get())
+                        .as_ptr()
+                        .add(self.state[&type_info.id].offset + i * type_info.layout.size())
+                        .cast::<u8>();
+                    let dest = (*target.data.get())
+                        .as_ptr()
+                        .add(target.state[&type_info.id].offset + i * type_info.layout.size())
+                        .cast::<u8>();
+
+                    (type_info.clone_into)(src, dest);
+                }
+            }
+        }
+
+        // this clones the list of entities in the archetype
+        target.entities = self.entities.clone();
+
+        target
+    }
+}
 
 impl Archetype {
     fn assert_type_info(types: &[TypeInfo]) {
@@ -407,6 +439,18 @@ impl TypeState {
     }
 }
 
+impl Clone for TypeState {
+    fn clone(&self) -> Self {
+        self.borrow.borrow();
+        let offset = self.offset;
+        self.borrow.release();
+        Self {
+            offset,
+            borrow: AtomicBorrow::new(),
+        }
+    }
+}
+
 /// Metadata required to store a component
 #[derive(Debug, Copy, Clone)]
 pub struct TypeInfo {
@@ -415,13 +459,18 @@ pub struct TypeInfo {
     drop: unsafe fn(*mut u8),
     #[cfg(debug_assertions)]
     type_name: &'static str,
+    clone_into: unsafe fn(*mut u8, *mut u8),
 }
 
 impl TypeInfo {
     /// Metadata for `T`
-    pub fn of<T: 'static>() -> Self {
+    pub fn of<T: 'static + Clone>() -> Self {
         unsafe fn drop_ptr<T>(x: *mut u8) {
             x.cast::<T>().drop_in_place()
+        }
+        unsafe fn clone_ptr<T: Clone>(x: *mut u8, y: *mut u8) {
+            let value = x.cast::<T>().as_ref().unwrap().clone();
+            std::ptr::write(y.cast::<T>().as_mut().unwrap(), value);
         }
 
         Self {
@@ -430,6 +479,7 @@ impl TypeInfo {
             drop: drop_ptr::<T>,
             #[cfg(debug_assertions)]
             type_name: core::any::type_name::<T>(),
+            clone_into: clone_ptr::<T>,
         }
     }
 

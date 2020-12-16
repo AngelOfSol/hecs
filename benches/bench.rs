@@ -5,10 +5,14 @@
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
+use std::{any::TypeId, collections::HashMap};
+
 use bencher::{benchmark_group, benchmark_main, Bencher};
 use hecs::*;
 
+#[derive(Clone)]
 struct Position(f32);
+#[derive(Clone)]
 struct Velocity(f32);
 
 fn spawn_tuple(b: &mut Bencher) {
@@ -65,16 +69,14 @@ fn iterate_100k(b: &mut Bencher) {
     })
 }
 
-fn iterate_mut_100k(b: &mut Bencher) {
+fn clone_100k(b: &mut Bencher) {
     let mut world = World::new();
     for i in 0..100_000 {
         world.spawn((Position(-(i as f32)), Velocity(i as f32)));
     }
     b.iter(|| {
-        for (_, (pos, vel)) in world.query_mut::<(&mut Position, &Velocity)>() {
-            pos.0 += vel.0;
-        }
-    })
+        let _ = world.clone();
+    });
 }
 
 fn build(b: &mut Bencher) {
@@ -92,7 +94,7 @@ benchmark_group!(
     spawn_static,
     spawn_batch,
     iterate_100k,
-    iterate_mut_100k,
-    build
+    clone_100k,
+    build,
 );
 benchmark_main!(benches);
