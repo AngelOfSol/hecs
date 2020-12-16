@@ -72,7 +72,7 @@ impl std::error::Error for MissingComponent {}
 
 macro_rules! tuple_impl {
     ($($name: ident),*) => {
-        unsafe impl<$($name: Component),*> DynamicBundle for ($($name,)*) {
+        unsafe impl<$($name: Component + Clone),*> DynamicBundle for ($($name,)*) {
             fn with_ids<T>(&self, f: impl FnOnce(&[TypeId]) -> T) -> T {
                 Self::with_static_ids(f)
             }
@@ -95,7 +95,7 @@ macro_rules! tuple_impl {
             }
         }
 
-        unsafe impl<$($name: Component),*> Bundle for ($($name,)*) {
+        unsafe impl<$($name: Component + Clone),*> Bundle for ($($name,)*) {
             fn with_static_ids<T>(f: impl FnOnce(&[TypeId]) -> T) -> T {
                 const N: usize = count!($($name),*);
                 let mut xs: [(usize, TypeId); N] = [$((mem::align_of::<$name>(), TypeId::of::<$name>())),*];

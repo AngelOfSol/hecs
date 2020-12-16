@@ -54,7 +54,7 @@ impl EntityBuilder {
     ///
     /// If the bundle already contains a component of type `T`, it will
     /// be dropped and replaced with the most recently added one.
-    pub fn add<T: Component>(&mut self, component: T) -> &mut Self {
+    pub fn add<T: Component + Clone>(&mut self, component: T) -> &mut Self {
         self.add_bundle((component,))
     }
 

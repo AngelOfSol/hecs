@@ -41,6 +41,7 @@ use crate::{
 /// following spawns and despawns, that handle may, in rare circumstances, collide with a
 /// newly-allocated `Entity` handle. Very long-lived applications should therefore limit the period
 /// over which they may retain handles of despawned entities.
+#[derive(Clone)]
 pub struct World {
     entities: Entities,
     index: HashMap<Box<[TypeId]>, u32>,
@@ -505,7 +506,7 @@ impl World {
     pub fn insert_one(
         &mut self,
         entity: Entity,
-        component: impl Component,
+        component: impl Component + Clone,
     ) -> Result<(), NoSuchEntity> {
         self.insert(entity, (component,))
     }
@@ -583,7 +584,10 @@ impl World {
     /// Remove the `T` component from `entity`
     ///
     /// See `remove`.
-    pub fn remove_one<T: Component>(&mut self, entity: Entity) -> Result<T, ComponentError> {
+    pub fn remove_one<T: Component + Clone>(
+        &mut self,
+        entity: Entity,
+    ) -> Result<T, ComponentError> {
         self.remove::<(T,)>(entity).map(|(x,)| x)
     }
 
@@ -925,7 +929,54 @@ where
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+
+    #[test]
+    fn clone() {
+        use std::string::String;
+        let mut world = World::new();
+        for x in 0..1000usize {
+            if x % 3 == 0 {
+                world.spawn((x,));
+            } else if x % 3 == 1 {
+                world.spawn((x, String::from("test")));
+            } else {
+                world.spawn(([40i32; 5], "my_test"));
+            }
+        }
+        let other_world = world.clone();
+
+        for (lhs, rhs) in other_world.iter().zip(world.iter()) {
+            assert_eq!(lhs.0, rhs.0);
+        }
+        for (lhs, rhs) in other_world
+            .query::<&usize>()
+            .iter()
+            .zip(world.query::<&usize>().iter())
+        {
+            assert_eq!(lhs.0, rhs.0);
+            assert_eq!(lhs.1, rhs.1);
+        }
+        for (lhs, rhs) in other_world
+            .query::<(&usize, &&'static str)>()
+            .iter()
+            .zip(world.query::<(&usize, &&'static str)>().iter())
+        {
+            assert_eq!(lhs.0, rhs.0);
+            assert_eq!(lhs.1 .0, rhs.1 .0);
+            assert_eq!(lhs.1 .1, rhs.1 .1);
+        }
+        for (lhs, rhs) in other_world
+            .query::<(&[i32; 5], &&'static str)>()
+            .iter()
+            .zip(world.query::<(&[i32; 5], &&'static str)>().iter())
+        {
+            assert_eq!(lhs.0, rhs.0);
+            assert_eq!(lhs.1, rhs.1);
+            assert_eq!(lhs.1 .1, rhs.1 .1);
+        }
+    }
 
     #[test]
     fn reuse_empty() {

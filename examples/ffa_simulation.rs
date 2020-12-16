@@ -14,22 +14,22 @@ use std::io;
 State of the simulation is displayed in the sconsole through println! functions.
 */
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Position {
     x: i32,
     y: i32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Health(i32);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Speed(i32);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Damage(i32);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct KillCount(i32);
 
 fn manhattan_dist(x0: i32, x1: i32, y0: i32, y1: i32) -> i32 {
