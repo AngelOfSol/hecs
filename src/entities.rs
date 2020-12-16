@@ -157,6 +157,7 @@ pub(crate) struct Entities {
     len: u32,
 }
 
+#[cfg(feature = "clone")]
 impl Clone for Entities {
     fn clone(&self) -> Self {
         Self {

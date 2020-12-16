@@ -34,36 +34,121 @@ pub struct Archetype {
     data: UnsafeCell<NonNull<u8>>,
     data_size: usize,
 }
-impl Clone for Archetype {
-    fn clone(&self) -> Self {
-        // [types] cloned
-        let mut target = Self::new(self.types.clone());
-        // [types, len, data_size, state, entities] cloned, value.data resized to match self.data
-        target.grow(self.len);
-        // todo verify that no one has a borrow or borrow mut out on the self object
 
-        // this properly initialies value.data to be the cloned equivalent of self.data
-        for type_info in self.types.iter() {
-            for i in 0..(self.len as usize) {
-                unsafe {
-                    let src = (*self.data.get())
-                        .as_ptr()
-                        .add(self.state[&type_info.id].offset + i * type_info.layout.size())
-                        .cast::<u8>();
-                    let dest = (*target.data.get())
-                        .as_ptr()
-                        .add(target.state[&type_info.id].offset + i * type_info.layout.size())
-                        .cast::<u8>();
+#[cfg(feature = "clone")]
+pub(crate) mod clone {
+    use super::TypeIdMap;
+    use crate::Archetype;
+    use core::any::TypeId;
+    use core::fmt;
 
-                    (type_info.clone_into)(src, dest);
+    unsafe fn clone_ptr<T: Clone>(x: *mut u8, y: *mut u8) {
+        let value = x.cast::<T>().as_ref().unwrap().clone();
+        std::ptr::write(y.cast::<T>().as_mut().unwrap(), value);
+    }
+
+    /// A registry of types to clone function pointers.  Only allows types that implement Clone to be registered.
+    pub struct CloneFuncs {
+        funcs: TypeIdMap<unsafe fn(*mut u8, *mut u8)>,
+    }
+
+    impl CloneFuncs {
+        /// Create a blank registry.
+
+        /// Registers the clone function pointer for the given type.
+        pub fn register<T: Clone + 'static>(&mut self) {
+            self.funcs.insert(TypeId::of::<T>(), clone_ptr::<T>);
+        }
+    }
+
+    impl Default for CloneFuncs {
+        fn default() -> Self {
+            Self {
+                funcs: TypeIdMap::default(),
+            }
+        }
+    }
+    /// Error indicating that a clone could not be completed
+    #[derive(Debug, Clone, Eq, PartialEq, Hash)]
+    pub enum CloneError {
+        /// Error indicating that a registry did not have a clone function pointer registered for a specific type
+        MissingClone(&'static str),
+        /// Error indicating that an archetype had an outstanding unique borrow preventing cloning
+        AlreadyUniquelyBorrowed(&'static str),
+    }
+
+    impl fmt::Display for CloneError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                CloneError::MissingClone(name) => {
+                    write!(f, "missing {}'s clone function pointer", name)
+                }
+                CloneError::AlreadyUniquelyBorrowed(name) => {
+                    write!(f, "{} is already uniquely borrowed", name)
                 }
             }
         }
+    }
 
-        // this clones the list of entities in the archetype
-        target.entities = self.entities.clone();
+    #[cfg(feature = "std")]
+    impl std::error::Error for CloneError {}
 
-        target
+    impl Archetype {
+        pub(crate) fn clone_with(&self, clone_funcs: &CloneFuncs) -> Result<Self, CloneError> {
+            if let Some(info) = self
+                .types
+                .iter()
+                .find(|info| !clone_funcs.funcs.contains_key(&info.id))
+            {
+                return Err(CloneError::MissingClone(info.type_name));
+            }
+
+            for (id, borrow) in self.state.iter() {
+                // TODO: Release prior borrows on failure?
+                // panic instead?
+                if !borrow.borrow.borrow() {
+                    return Err(CloneError::AlreadyUniquelyBorrowed(
+                        self.types
+                            .iter()
+                            .find(|info| info.id == *id)
+                            .unwrap()
+                            .type_name,
+                    ));
+                }
+            }
+
+            let mut new_archetype = Self::new(self.types.clone());
+
+            new_archetype.grow(self.len);
+            new_archetype.entities = self.entities.clone();
+
+            for type_info in self.types.iter() {
+                let clone_func = clone_funcs.funcs[&type_info.id];
+                for i in 0..(self.len as usize) {
+                    unsafe {
+                        let src = (*self.data.get())
+                            .as_ptr()
+                            .add(self.state[&type_info.id].offset + i * type_info.layout.size())
+                            .cast::<u8>();
+                        let dest = (*new_archetype.data.get())
+                            .as_ptr()
+                            .add(
+                                new_archetype.state[&type_info.id].offset
+                                    + i * type_info.layout.size(),
+                            )
+                            .cast::<u8>();
+
+                        (clone_func)(src, dest);
+                    }
+                }
+            }
+
+            for (_, borrow) in self.state.iter() {
+                borrow.borrow.release()
+            }
+
+            Ok(new_archetype)
+        }
     }
 }
 
@@ -439,18 +524,6 @@ impl TypeState {
     }
 }
 
-impl Clone for TypeState {
-    fn clone(&self) -> Self {
-        self.borrow.borrow();
-        let offset = self.offset;
-        self.borrow.release();
-        Self {
-            offset,
-            borrow: AtomicBorrow::new(),
-        }
-    }
-}
-
 /// Metadata required to store a component
 #[derive(Debug, Copy, Clone)]
 pub struct TypeInfo {
@@ -459,18 +532,13 @@ pub struct TypeInfo {
     drop: unsafe fn(*mut u8),
     #[cfg(debug_assertions)]
     type_name: &'static str,
-    clone_into: unsafe fn(*mut u8, *mut u8),
 }
 
 impl TypeInfo {
     /// Metadata for `T`
-    pub fn of<T: 'static + Clone>() -> Self {
+    pub fn of<T: 'static>() -> Self {
         unsafe fn drop_ptr<T>(x: *mut u8) {
             x.cast::<T>().drop_in_place()
-        }
-        unsafe fn clone_ptr<T: Clone>(x: *mut u8, y: *mut u8) {
-            let value = x.cast::<T>().as_ref().unwrap().clone();
-            std::ptr::write(y.cast::<T>().as_mut().unwrap(), value);
         }
 
         Self {
@@ -479,7 +547,6 @@ impl TypeInfo {
             drop: drop_ptr::<T>,
             #[cfg(debug_assertions)]
             type_name: core::any::type_name::<T>(),
-            clone_into: clone_ptr::<T>,
         }
     }
 

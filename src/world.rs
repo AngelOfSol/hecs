@@ -10,6 +10,8 @@ use core::any::TypeId;
 use core::convert::TryFrom;
 use core::{fmt, mem, ptr};
 
+#[cfg(feature = "clone")]
+use crate::{archetype::clone::CloneError, CloneFuncs};
 #[cfg(feature = "std")]
 use std::error::Error;
 
@@ -41,7 +43,6 @@ use crate::{
 /// following spawns and despawns, that handle may, in rare circumstances, collide with a
 /// newly-allocated `Entity` handle. Very long-lived applications should therefore limit the period
 /// over which they may retain handles of despawned entities.
-#[derive(Clone)]
 pub struct World {
     entities: Entities,
     index: HashMap<Box<[TypeId]>, u32>,
@@ -506,7 +507,7 @@ impl World {
     pub fn insert_one(
         &mut self,
         entity: Entity,
-        component: impl Component + Clone,
+        component: impl Component,
     ) -> Result<(), NoSuchEntity> {
         self.insert(entity, (component,))
     }
@@ -584,10 +585,7 @@ impl World {
     /// Remove the `T` component from `entity`
     ///
     /// See `remove`.
-    pub fn remove_one<T: Component + Clone>(
-        &mut self,
-        entity: Entity,
-    ) -> Result<T, ComponentError> {
+    pub fn remove_one<T: Component>(&mut self, entity: Entity) -> Result<T, ComponentError> {
         self.remove::<(T,)>(entity).map(|(x,)| x)
     }
 
@@ -683,6 +681,25 @@ impl World {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Clones a world, using a registry for clone function pointers.
+    ///
+    /// Returns an error if an archetype was unable to be cloned.
+    #[cfg(feature = "clone")]
+    pub fn clone_with(&self, clone_funcs: &CloneFuncs) -> Result<Self, CloneError> {
+        let archetypes: Result<Vec<_>, _> = self
+            .archetypes()
+            .map(|item| item.clone_with(clone_funcs))
+            .collect();
+        let archetypes = archetypes?;
+        let cloned_world = Self {
+            entities: self.entities.clone(),
+            index: self.index.clone(),
+            archetype_generation: self.archetype_generation,
+            archetypes,
+        };
+        Ok(cloned_world)
     }
 }
 
@@ -929,54 +946,7 @@ where
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
-
-    #[test]
-    fn clone() {
-        use std::string::String;
-        let mut world = World::new();
-        for x in 0..1000usize {
-            if x % 3 == 0 {
-                world.spawn((x,));
-            } else if x % 3 == 1 {
-                world.spawn((x, String::from("test")));
-            } else {
-                world.spawn(([40i32; 5], "my_test"));
-            }
-        }
-        let other_world = world.clone();
-
-        for (lhs, rhs) in other_world.iter().zip(world.iter()) {
-            assert_eq!(lhs.0, rhs.0);
-        }
-        for (lhs, rhs) in other_world
-            .query::<&usize>()
-            .iter()
-            .zip(world.query::<&usize>().iter())
-        {
-            assert_eq!(lhs.0, rhs.0);
-            assert_eq!(lhs.1, rhs.1);
-        }
-        for (lhs, rhs) in other_world
-            .query::<(&usize, &&'static str)>()
-            .iter()
-            .zip(world.query::<(&usize, &&'static str)>().iter())
-        {
-            assert_eq!(lhs.0, rhs.0);
-            assert_eq!(lhs.1 .0, rhs.1 .0);
-            assert_eq!(lhs.1 .1, rhs.1 .1);
-        }
-        for (lhs, rhs) in other_world
-            .query::<(&[i32; 5], &&'static str)>()
-            .iter()
-            .zip(world.query::<(&[i32; 5], &&'static str)>().iter())
-        {
-            assert_eq!(lhs.0, rhs.0);
-            assert_eq!(lhs.1, rhs.1);
-            assert_eq!(lhs.1 .1, rhs.1 .1);
-        }
-    }
 
     #[test]
     fn reuse_empty() {
@@ -1021,5 +991,83 @@ mod tests {
         let mut world = World::new();
         let a = world.spawn(("abc", 123));
         world.remove::<()>(a).unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "clone")]
+    fn clone() {
+        use crate::CloneFuncs;
+
+        let mut world = World::new();
+        for x in 0..100usize {
+            if x % 3 == 0 {
+                world.spawn((x,));
+            } else if x % 3 == 1 {
+                world.spawn((x, "str"));
+            } else {
+                world.spawn(("str",));
+            }
+        }
+        let mut clone_funcs = CloneFuncs::default();
+
+        clone_funcs.register::<usize>();
+        clone_funcs.register::<&str>();
+
+        let other_world = world.clone_with(&clone_funcs).unwrap();
+
+        for (lhs, rhs) in other_world.iter().zip(world.iter()) {
+            assert_eq!(lhs.0, rhs.0);
+        }
+
+        for (lhs, rhs) in other_world
+            .query::<&usize>()
+            .iter()
+            .zip(world.query::<&usize>().iter())
+        {
+            assert_eq!(lhs.0, rhs.0);
+            assert_eq!(lhs.1, rhs.1);
+        }
+        for (lhs, rhs) in other_world
+            .query::<&&str>()
+            .iter()
+            .zip(world.query::<&&str>().iter())
+        {
+            assert_eq!(lhs.0, rhs.0);
+            assert_eq!(lhs.1, rhs.1);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "clone")]
+    fn clone_missing_clone_function_pointer() {
+        use crate::CloneFuncs;
+
+        let mut world = World::new();
+        world.spawn((0usize,));
+
+        assert_eq!(
+            world.clone_with(&CloneFuncs::default()).map(|_| ()),
+            Err(CloneError::MissingClone("usize"))
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "clone")]
+    fn clone_already_borrowed() {
+        use crate::CloneFuncs;
+
+        let mut world = World::new();
+        world.spawn((0usize,));
+        let mut clone_funcs = CloneFuncs::default();
+        clone_funcs.register::<usize>();
+
+        {
+            let mut x = world.query::<&mut usize>();
+            let _ = x.iter();
+            assert_eq!(
+                world.clone_with(&clone_funcs).map(|_| ()),
+                Err(CloneError::AlreadyUniquelyBorrowed("usize"))
+            );
+        }
     }
 }
