@@ -5,13 +5,16 @@
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
-use crate::alloc::vec::Vec;
+use crate::{alloc::vec::Vec, ColumnBatchType};
 use core::any::TypeId;
 use core::convert::TryFrom;
 use core::{fmt, mem, ptr};
 
 #[cfg(feature = "std")]
 use std::error::Error;
+
+#[cfg(feature = "clone")]
+use crate::clone::CloneRegistry;
 
 use hashbrown::{HashMap, HashSet};
 
@@ -46,6 +49,8 @@ pub struct World {
     index: HashMap<Box<[TypeId]>, u32>,
     archetypes: Vec<Archetype>,
     archetype_generation: u64,
+    #[cfg(feature = "clone")]
+    clone_registry: CloneRegistry,
 }
 
 impl World {
@@ -61,6 +66,24 @@ impl World {
             index,
             archetypes,
             archetype_generation: 0,
+            #[cfg(feature = "clone")]
+            clone_registry: CloneRegistry::default(),
+        }
+    }
+    #[cfg(feature = "clone")]
+    /// Create an empty world with a registry to be used for cloning.
+    pub fn with_registry(clone_registry: CloneRegistry) -> Self {
+        // `flush` assumes archetype 0 always exists, representing entities with no components.
+        let mut archetypes = Vec::new();
+        archetypes.push(Archetype::new(Vec::new()));
+        let mut index = HashMap::default();
+        index.insert(Box::default(), 0);
+        Self {
+            entities: Entities::default(),
+            index,
+            archetypes,
+            archetype_generation: 0,
+            clone_registry,
         }
     }
 
@@ -779,6 +802,84 @@ impl World {
 unsafe impl Send for World {}
 unsafe impl Sync for World {}
 
+#[cfg(feature = "clone")]
+impl Clone for World {
+    fn clone(&self) -> Self {
+        let mut new_world = Self::with_registry(self.clone_registry.clone());
+
+        for archetype in self.archetypes() {
+            debug_assert!(archetype.component_types().all(|item| self
+                .clone_registry
+                .0
+                .iter()
+                .any(|register| register.type_id == item)));
+            let mut types = ColumnBatchType::new();
+            for entry in self
+                .clone_registry
+                .0
+                .iter()
+                .filter(|item| archetype.has_dynamic(item.type_id))
+            {
+                (entry.add_type)(&mut types);
+            }
+            let mut batch = types.into_batch(archetype.len());
+            for entry in self
+                .clone_registry
+                .0
+                .iter()
+                .filter(|item| archetype.has_dynamic(item.type_id))
+            {
+                (entry.add_values)(&mut batch, archetype);
+            }
+            let entities: Box<[_]> = archetype
+                .ids()
+                .iter()
+                .map(|id| unsafe { self.find_entity_from_id(*id) })
+                .collect();
+            new_world.spawn_column_batch_at(&entities, batch.build().unwrap());
+        }
+
+        new_world
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        self.clone_registry = source.clone_registry.clone();
+        self.clear();
+
+        for archetype in source.archetypes() {
+            debug_assert!(archetype.component_types().all(|item| source
+                .clone_registry
+                .0
+                .iter()
+                .any(|register| register.type_id == item)));
+            let mut types = ColumnBatchType::new();
+            for entry in source
+                .clone_registry
+                .0
+                .iter()
+                .filter(|item| archetype.has_dynamic(item.type_id))
+            {
+                (entry.add_type)(&mut types);
+            }
+            let mut batch = types.into_batch(archetype.len());
+            for entry in source
+                .clone_registry
+                .0
+                .iter()
+                .filter(|item| archetype.has_dynamic(item.type_id))
+            {
+                (entry.add_values)(&mut batch, archetype);
+            }
+            let entities: Box<[_]> = archetype
+                .ids()
+                .iter()
+                .map(|id| unsafe { source.find_entity_from_id(*id) })
+                .collect();
+            self.spawn_column_batch_at(&entities, batch.build().unwrap());
+        }
+    }
+}
+
 impl Default for World {
     fn default() -> Self {
         Self::new()
@@ -1097,5 +1198,54 @@ mod tests {
         let mut world = World::new();
         let a = world.spawn(("abc", 123));
         world.remove::<()>(a).unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "clone")]
+    #[allow(clippy::redundant_clone)]
+    fn clone() {
+        let mut world = World::with_registry(
+            CloneRegistry::default()
+                .register::<usize>()
+                .register::<&str>(),
+        );
+        world.spawn((123usize,));
+        world.spawn((456usize,));
+        world.spawn((789usize,));
+        world.spawn((1usize, "a"));
+        world.spawn((2usize, "ab"));
+        world.spawn((3usize, "abc"));
+        world.spawn(("d",));
+        world.spawn(("de",));
+        world.spawn(("def",));
+
+        let new_world = world.clone().clone().clone();
+
+        for (left, right) in world
+            .query::<&usize>()
+            .iter()
+            .zip(new_world.query::<&usize>().iter())
+        {
+            assert_eq!(left, right);
+        }
+
+        for (left, right) in world
+            .query::<&&str>()
+            .iter()
+            .zip(new_world.query::<&&str>().iter())
+        {
+            assert_eq!(left, right);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "clone")]
+    #[allow(clippy::redundant_clone)]
+    #[should_panic]
+    fn clone_missing_registry() {
+        let mut world = World::new();
+        world.spawn((123usize,));
+
+        let _x = world.clone();
     }
 }

@@ -59,6 +59,8 @@ mod archetype;
 mod batch;
 mod borrow;
 mod bundle;
+#[cfg(feature = "clone")]
+pub mod clone;
 mod entities;
 mod entity_builder;
 mod query;

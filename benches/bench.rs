@@ -6,9 +6,12 @@
 // copied, modified, or distributed except according to those terms.
 
 use bencher::{benchmark_group, benchmark_main, Bencher};
+use clone::CloneRegistry;
 use hecs::*;
 
+#[derive(Clone)]
 struct Position(f32);
+#[derive(Clone)]
 struct Velocity(f32);
 
 fn spawn_tuple(b: &mut Bencher) {
@@ -70,11 +73,53 @@ fn iterate_mut_100k(b: &mut Bencher) {
     for i in 0..100_000 {
         world.spawn((Position(-(i as f32)), Velocity(i as f32)));
     }
+
     b.iter(|| {
         for (_, (pos, vel)) in world.query_mut::<(&mut Position, &Velocity)>() {
             pos.0 += vel.0;
         }
     })
+}
+
+fn clone_100k(b: &mut Bencher) {
+    let mut world = World::with_registry(
+        CloneRegistry::default()
+            .register::<Position>()
+            .register::<Velocity>(),
+    );
+    for i in 0..50_000 {
+        world.spawn((Position(-(i as f32)), Velocity(i as f32)));
+    }
+    for i in 0..25_000 {
+        world.spawn((Velocity(i as f32),));
+    }
+    for i in 0..25_000 {
+        world.spawn((Position(-(i as f32)),));
+    }
+
+    b.iter(|| {
+        let _ = world.clone();
+    })
+}
+fn clone_from_100k(b: &mut Bencher) {
+    let mut world = World::with_registry(
+        CloneRegistry::default()
+            .register::<Position>()
+            .register::<Velocity>(),
+    );
+    for i in 0..50_000 {
+        world.spawn((Position(-(i as f32)), Velocity(i as f32)));
+    }
+    for i in 0..25_000 {
+        world.spawn((Velocity(i as f32),));
+    }
+    for i in 0..25_000 {
+        world.spawn((Position(-(i as f32)),));
+    }
+
+    let mut other_world = world.clone();
+
+    b.iter(|| other_world.clone_from(&world))
 }
 
 fn build(b: &mut Bencher) {
@@ -93,6 +138,8 @@ benchmark_group!(
     spawn_batch,
     iterate_100k,
     iterate_mut_100k,
+    clone_100k,
+    clone_from_100k,
     build
 );
 benchmark_main!(benches);
